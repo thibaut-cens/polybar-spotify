@@ -3,6 +3,8 @@
 import sys
 import dbus
 import argparse
+import traceback
+import json
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -19,7 +21,6 @@ parser.add_argument(
     dest='custom_format'
 )
 parser.add_argument(
-    '-p',
     '--playpause',
     type=str,
     metavar='play-pause indicator',
@@ -44,6 +45,21 @@ parser.add_argument(
     help="if set, don't show any output when the current song is paused",
     dest='quiet',
 )
+parser.add_argument(
+    '-p',
+    '--player',
+    type=str,
+    help="Name of the dbus MediaPlayer",
+    dest='player',
+    default="spotifyd"
+)
+parser.add_argument(
+    '--tmpfile',
+    type=str,
+    help="Temporary file to store last polled informations ofr use if no metadate are returned",
+    dest='player',
+    default="/tmp/polybar-play-lastplayed.json"
+)
 
 args = parser.parse_args()
 
@@ -65,11 +81,45 @@ def truncate(name, trunclen):
     return name
 
 
+def get_song_info(player: str, tmpfile : str = "/tmp/polybar-spotifyd-lastplayed.json"):
+    if player == "mpd":
+        from mpd import MPDClient
+        client = MPDClient()
+        client.connect("localhost", 6600)
+        song_info = client.currentsong()
+        return song_info["artist"], song_info["title"]
+    else:
+        bus = dbus.SessionBus()
+        try:
+            proxy = bus.get_object("org.mpris.MediaPlayer2.%s" % player,
+                                   "/org/mpris/MediaPlayer2")
+        except dbus.exceptions.DBusException:
+            print("[ERROR] Player \"%s\" doesn't exist or isn't playing"
+                  % player, file=sys.stderr)
+            exit(1)
+
+        interface = dbus.Interface(
+            proxy, dbus_interface="org.freedesktop.DBus.Properties"
+        )
+        properties = interface.GetAll("org.mpris.MediaPlayer2.Player")
+        metadata = properties["Metadata"]
+        if len(metadata) == 0:
+            with open(tmpfile, "r") as f:
+                metadata = json.load(f)
+        else:
+            with open(tmpfile, "w+") as f:
+                json.dump(metadata, f)
+        artist = fix_string(str(metadata['xesam:artist'][0])) if 'xesam:artist' in metadata else ''
+        song = fix_string(str(metadata['xesam:title'])) if 'xesam:title' in metadata else ''
+        album = fix_string(str(metadata['xesam:album'])) if 'xesam:album' in metadata else ''
+        status = properties['PlaybackStatus'] if properties['PlaybackStatus'] else "unknown"
+        return status, artist, song, album
+
 
 # Default parameters
 output = fix_string(u'{play_pause} {artist}: {song}')
 trunclen = 35
-play_pause = fix_string(u'\u25B6,\u23F8') # first character is play, second is paused
+play_pause = fix_string(u'\uf04b,\uf04c,?')  # first character is play, second is paused
 
 label_with_font = '%{{T{font}}}{label}%{{T-}}'
 font = args.font
@@ -85,57 +135,34 @@ if args.custom_format is not None:
 if args.play_pause is not None:
     play_pause = args.play_pause
 
-try:
-    session_bus = dbus.SessionBus()
-    spotify_bus = session_bus.get_object(
-        'org.mpris.MediaPlayer2.spotifyd',
-        '/org/mpris/MediaPlayer2'
-    )
+status, artist, song, album = get_song_info(args.player)
+# Handle play/pause label
 
-    spotify_properties = dbus.Interface(
-        spotify_bus,
-        'org.freedesktop.DBus.Properties'
-    )
+play_pause = play_pause.split(',')
 
-    metadata = spotify_properties.Get('org.mpris.MediaPlayer2.Player', 'Metadata')
-    status = spotify_properties.Get('org.mpris.MediaPlayer2.Player', 'PlaybackStatus')
+if status == 'Playing':
+    play_pause = play_pause[0] if len(play_pause) > 0 else '\uf04b'
+elif status == 'Paused':
+    play_pause = play_pause[1] if len(play_pause) > 1 else '\uf04c'
+elif status == 'unkwnown':
+    play_pause = play_pause[2] if len(play_pause) > 2 else '?'
+else:
+    play_pause = str()
 
-    # Handle play/pause label
+if play_pause_font:
+    play_pause = label_with_font.format(font=play_pause_font, label=play_pause)
 
-    play_pause = play_pause.split(',')
+if (quiet and status == 'Paused') or (not artist and not song and not album):
+    print('')
+else:
+    if font:
+        artist = label_with_font.format(font=font, label=artist)
+        song = label_with_font.format(font=font, label=song)
+        album = label_with_font.format(font=font, label=album)
 
-    if status == 'Playing':
-        play_pause = play_pause[0]
-    elif status == 'Paused':
-        play_pause = play_pause[1]
-    else:
-        play_pause = str()
-
-    if play_pause_font:
-        play_pause = label_with_font.format(font=play_pause_font, label=play_pause)
-
-    # Handle main label
-
-    artist = fix_string(metadata['xesam:artist'][0]) if metadata['xesam:artist'] else ''
-    song = fix_string(metadata['xesam:title']) if metadata['xesam:title'] else ''
-    album = fix_string(metadata['xesam:album']) if metadata['xesam:album'] else ''
-
-    if (quiet and status == 'Paused') or (not artist and not song and not album):
-        print('')
-    else:
-        if font:
-            artist = label_with_font.format(font=font, label=artist)
-            song = label_with_font.format(font=font, label=song)
-            album = label_with_font.format(font=font, label=album)
-
-        # Add 4 to trunclen to account for status symbol, spaces, and other padding characters
-        print(truncate(output.format(artist=artist, 
-                                     song=song, 
-                                     play_pause=play_pause, 
-                                     album=album), trunclen + 4))
-
-except Exception as e:
-    if isinstance(e, dbus.exceptions.DBusException):
-        print('')
-    else:
-        print(e)
+    # Add 4 to trunclen to account for status symbol, spaces, and other padding characters
+    out = output.format(artist=artist,
+                        song=song,
+                        play_pause=play_pause,
+                        album=album)
+    print(truncate(out, trunclen + 4))
