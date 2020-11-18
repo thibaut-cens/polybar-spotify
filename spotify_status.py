@@ -93,16 +93,15 @@ def get_song_info(player: str, tmpfile : str = "/tmp/polybar-spotifyd-lastplayed
         try:
             proxy = bus.get_object("org.mpris.MediaPlayer2.%s" % player,
                                    "/org/mpris/MediaPlayer2")
-        except dbus.exceptions.DBusException:
-            print("[ERROR] Player \"%s\" doesn't exist or isn't playing"
-                  % player, file=sys.stderr)
-            exit(1)
 
-        interface = dbus.Interface(
-            proxy, dbus_interface="org.freedesktop.DBus.Properties"
-        )
-        properties = interface.GetAll("org.mpris.MediaPlayer2.Player")
-        metadata = properties["Metadata"]
+            interface = dbus.Interface(proxy, dbus_interface="org.freedesktop.DBus.Properties")
+
+            properties = interface.GetAll("org.mpris.MediaPlayer2.Player")
+            metadata = properties["Metadata"]
+        except Exception as e:
+            print("[ERROR] " + str(e), file=sys.stderr)
+            sys.exit(1)
+
         if len(metadata) == 0:
             with open(tmpfile, "r") as f:
                 metadata = json.load(f)
